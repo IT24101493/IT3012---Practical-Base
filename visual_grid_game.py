@@ -11,6 +11,7 @@ class EnvironmentState:
         self.width = width
         self.height = height
         self.agent_pos: List[int] = [0, 0]
+        self.heading: str = 'Up'  # Heading for partial observability
 
         # Initialize static obstacles
         self.walls: Set[Tuple[int, int]] = set(custom_walls) if custom_walls is not None else {
@@ -31,7 +32,7 @@ class EnvironmentState:
             )
         ]
 
-        # Step 2.1: Add toxic traps avoiding starting position, walls, and food
+        # Add toxic traps avoiding starting position, walls, and food
         self.toxic_traps: Set[Tuple[int, int]] = self._generate_unique_positions(
             count=num_traps,
             excluded=self.walls | self.food_positions | {tuple(op) for op in self.opponents} | {(0, 0)}
@@ -48,6 +49,73 @@ class EnvironmentState:
         return positions
 
 
+class SimpleReflexAgent:
+    """Step 1.2: Simple Reflex Agent using strict IF-THEN condition-action rules without memory."""
+    
+    def sense_and_act(self, percept: Dict[str, Any]) -> str:
+        if percept.get('food_here'):
+            return 'Suck'
+        elif percept.get('wall_ahead'):
+            return 'TurnLeft'
+        else:
+            return 'MoveForward'
+
+
+class ModelBasedAgent:
+    """Step 1.3: Model-Based Agent with internal state tracking and history memory."""
+
+    def __init__(self):
+        self.visited_cells: Set[Tuple[int, int]] = set()
+        self.estimated_pos: List[int] = [0, 0]
+        self.heading: str = 'Up'
+        self.last_action: str = 'None'
+
+    def sense_and_act(self, percept: Dict[str, Any]) -> str:
+        # --- 1. Update State (Transition & Sensor Model) ---
+        if self.last_action == 'MoveForward' and not percept.get('hit_wall', False):
+            if self.heading == 'Up':
+                self.estimated_pos[1] += 1
+            elif self.heading == 'Down':
+                self.estimated_pos[1] -= 1
+            elif self.heading == 'Left':
+                self.estimated_pos[0] -= 1
+            elif self.heading == 'Right':
+                self.estimated_pos[0] += 1
+        elif self.last_action == 'TurnLeft':
+            directions = ['Up', 'Left', 'Down', 'Right']
+            self.heading = directions[(directions.index(self.heading) + 1) % 4]
+        elif self.last_action == 'TurnRight':
+            directions = ['Up', 'Right', 'Down', 'Left']
+            self.heading = directions[(directions.index(self.heading) + 1) % 4]
+
+        current_tuple = tuple(self.estimated_pos)
+        self.visited_cells.add(current_tuple)
+
+        # Determine coordinates of the cell ahead for memory lookup
+        ahead_pos = list(self.estimated_pos)
+        if self.heading == 'Up':
+            ahead_pos[1] += 1
+        elif self.heading == 'Down':
+            ahead_pos[1] -= 1
+        elif self.heading == 'Left':
+            ahead_pos[0] -= 1
+        elif self.heading == 'Right':
+            ahead_pos[0] += 1
+        ahead_tuple = tuple(ahead_pos)
+
+        # --- 2. Memory-Based IF-THEN Rules ---
+        if percept.get('food_here'):
+            action = 'Suck'
+        elif percept.get('wall_ahead') or ahead_tuple in self.visited_cells:
+            # If wall ahead or already visited, alternate movement path to escape loops
+            action = 'TurnRight'
+        else:
+            action = 'MoveForward'
+
+        self.last_action = action
+        return action
+
+
 class VisualGridHuntGame:
     """Main game engine managing physics rules, step evaluation, and performance score."""
 
@@ -57,6 +125,7 @@ class VisualGridHuntGame:
         self.score: int = 0
         self.steps: int = 0
         self.collision: bool = False
+        self.agent = ModelBasedAgent()  # Using ModelBasedAgent for Step 1.3
 
     @property
     def width(self) -> int:
@@ -67,32 +136,66 @@ class VisualGridHuntGame:
         return self.state.height
 
     def get_percept(self) -> Dict[str, Any]:
-        """Perception Subsystem - Step 2.2: Returns sensor data including 'smells_toxin'."""
+        """Step 1.1: Returns partial observable local sensor data."""
         current_pos_tuple = tuple(self.state.agent_pos)
+        
+        # Determine cell directly ahead based on current heading
+        ahead_pos = list(self.state.agent_pos)
+        if self.state.heading == 'Up':
+            ahead_pos[1] += 1
+        elif self.state.heading == 'Down':
+            ahead_pos[1] -= 1
+        elif self.state.heading == 'Left':
+            ahead_pos[0] -= 1
+        elif self.state.heading == 'Right':
+            ahead_pos[0] += 1
+            
+        ahead_tuple = tuple(ahead_pos)
+        is_out_of_bounds = not (0 <= ahead_pos[0] < self.state.width and 0 <= ahead_pos[1] < self.state.height)
+
         return {
-            'agent_pos': list(self.state.agent_pos),
-            'opponent_positions': [list(op) for op in self.state.opponents],
-            'smells_food': current_pos_tuple in self.state.food_positions,
+            'wall_ahead': is_out_of_bounds or (ahead_tuple in self.state.walls),
+            'food_here': current_pos_tuple in self.state.food_positions,
+            'toxin_here': current_pos_tuple in self.state.toxic_traps,
             'hit_wall': current_pos_tuple in self.state.walls,
-            'smells_toxin': current_pos_tuple in self.state.toxic_traps,  # Step 2.2 Percept key
             'collision': self.collision,
             'score': self.score,
             'remaining_food': len(self.state.food_positions)
         }
 
     def execute_action(self, action: str) -> None:
-        """Executes agent movement, opponent movement, collision detection, and score updates."""
+        """Executes agent movement, rotations, opponent movement, and score updates."""
         self.steps += 1
-        new_pos = list(self.state.agent_pos)
+        
+        # Handle Agent Rotations
+        directions = ['Up', 'Right', 'Down', 'Left']
+        current_idx = directions.index(self.state.heading)
+        
+        if action == 'TurnLeft':
+            self.state.heading = directions[(current_idx - 1) % 4]
+            return
+        elif action == 'TurnRight':
+            self.state.heading = directions[(current_idx + 1) % 4]
+            return
+        elif action == 'Suck':
+            # Collect food if present
+            tuple_pos = tuple(self.state.agent_pos)
+            if tuple_pos in self.state.food_positions:
+                self.state.food_positions.remove(tuple_pos)
+                self.score += 20
+            return
 
-        if action == 'Up':
-            new_pos[1] = min(self.state.height - 1, new_pos[1] + 1)
-        elif action == 'Down':
-            new_pos[1] = max(0, new_pos[1] - 1)
-        elif action == 'Left':
-            new_pos[0] = max(0, new_pos[0] - 1)
-        elif action == 'Right':
-            new_pos[0] = min(self.state.width - 1, new_pos[0] + 1)
+        # Handle Forward Movement
+        new_pos = list(self.state.agent_pos)
+        if action == 'MoveForward':
+            if self.state.heading == 'Up':
+                new_pos[1] = min(self.state.height - 1, new_pos[1] + 1)
+            elif self.state.heading == 'Down':
+                new_pos[1] = max(0, new_pos[1] - 1)
+            elif self.state.heading == 'Left':
+                new_pos[0] = max(0, new_pos[0] - 1)
+            elif self.state.heading == 'Right':
+                new_pos[0] = min(self.state.width - 1, new_pos[0] + 1)
 
         # Wall collision check
         if tuple(new_pos) in self.state.walls:
@@ -102,12 +205,12 @@ class VisualGridHuntGame:
 
         tuple_pos = tuple(self.state.agent_pos)
 
-        # Food pickup
+        # Food pickup automatically on coordinate entry
         if tuple_pos in self.state.food_positions:
             self.state.food_positions.remove(tuple_pos)
             self.score += 20
 
-        # Step 2.3: Toxic trap interaction penalty (-15 points)
+        # Toxic trap interaction penalty (-15 points)
         if tuple_pos in self.state.toxic_traps:
             self.score -= 15
 
@@ -137,7 +240,7 @@ class GridGameGUI:
     def __init__(self, root: tk.Tk, width: int = 10, height: int = 10, 
                  num_food: int = 12, num_opponents: int = 2, num_traps: int = 5, walls: Set[Tuple[int, int]] = None):
         self.root = root
-        self.root.title("IT3012 - Scalable Multi-Agent Grid Hunt")
+        self.root.title("IT3012 - Model-Based Agent Grid Hunt")
 
         self.env = VisualGridHuntGame(width=width, height=height, num_food=num_food, 
                                       num_opponents=num_opponents, num_traps=num_traps, custom_walls=walls)
@@ -160,10 +263,9 @@ class GridGameGUI:
         self.draw_grid()
 
     def draw_grid(self) -> None:
-        """Step 2.3: Renders grid entities including purple toxic trap shapes on the canvas."""
+        """Renders grid entities including traps, food, opponents, and agent on the canvas."""
         self.canvas.delete("all")
 
-        # Draw grid cells and walls
         for x in range(self.env.width):
             for y in range(self.env.height):
                 x1 = x * self.cell_size
@@ -177,7 +279,7 @@ class GridGameGUI:
                 if self.cell_size >= 40 and (x, y) in self.env.state.walls:
                     self.canvas.create_text(x1 + self.cell_size / 2, y1 + self.cell_size / 2, text="W", fill="white", font=("Arial", 8, "bold"))
 
-        # Step 2.3: Render Toxic Traps (Custom Purple Shapes)
+        # Render Toxic Traps
         for tx, ty in self.env.state.toxic_traps:
             offset = self.cell_size * 0.2
             x1 = tx * self.cell_size + offset
@@ -212,15 +314,12 @@ class GridGameGUI:
 
         def step():
             if not self.env.is_done():
-                action = random.choice(['Up', 'Down', 'Left', 'Right'])
+                percept = self.env.get_percept()
+                action = self.env.agent.sense_and_act(percept)
                 self.env.execute_action(action)
                 self.draw_grid()
 
-                percept = self.env.get_percept()
                 status_text = f"Score: {percept['score']} | Steps: {self.env.steps} | Action: {action}"
-                if percept['smells_toxin']:
-                    status_text += " | TRAP HIT! (-15)"
-
                 self.label.config(text=status_text)
                 self.root.after(250, step)
             else:
