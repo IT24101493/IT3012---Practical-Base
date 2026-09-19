@@ -1,238 +1,336 @@
 import random
-from collections import deque   # Practical 03: FIFO frontier for BFS
-import heapq                    # Practical 03: priority-queue frontier for UCS
+import tkinter as tk
+from typing import List, Set, Tuple, Dict, Any
 
 
-class GreedyGridAgent:
-    """A simple agent that wanders randomly to clear the grid."""
+class EnvironmentState:
+    """Encapsulates physical boundaries, entities, and hazard states of the grid."""
 
-    def __init__(self):
-        self.actions_pool = ['Up', 'Down', 'Left', 'Right']
+    def __init__(self, width: int = 10, height: int = 10, num_food: int = 10, 
+                 num_opponents: int = 2, num_traps: int = 5, custom_walls: Set[Tuple[int, int]] = None):
+        self.width = width
+        self.height = height
+        self.agent_pos: List[int] = [0, 0]
+        self.heading: str = 'Up'  # Heading for partial observability
 
-    def sense_and_act(self, percept: dict) -> str:
-        return random.choice(self.actions_pool)
+        # Initialize static obstacles
+        self.walls: Set[Tuple[int, int]] = set(custom_walls) if custom_walls is not None else {
+            (2, 2), (2, 3), (5, 5), (6, 5), (3, 7)
+        }
+
+        # Dynamically generate non-overlapping food positions
+        self.food_positions: Set[Tuple[int, int]] = self._generate_unique_positions(
+            count=num_food, 
+            excluded=self.walls | {(0, 0)}
+        )
+
+        # Generate adversarial opponents
+        self.opponents: List[List[int]] = [
+            list(pos) for pos in self._generate_unique_positions(
+                count=num_opponents, 
+                excluded=self.walls | self.food_positions | {(0, 0)}
+            )
+        ]
+
+        # Add toxic traps avoiding starting position, walls, and food
+        self.toxic_traps: Set[Tuple[int, int]] = self._generate_unique_positions(
+            count=num_traps,
+            excluded=self.walls | self.food_positions | {tuple(op) for op in self.opponents} | {(0, 0)}
+        )
+
+    def _generate_unique_positions(self, count: int, excluded: Set[Tuple[int, int]]) -> Set[Tuple[int, int]]:
+        positions = set()
+        while len(positions) < count:
+            fx = random.randint(0, self.width - 1)
+            fy = random.randint(0, self.height - 1)
+            pos = (fx, fy)
+            if pos not in excluded:
+                positions.add(pos)
+        return positions
 
 
 class SimpleReflexAgent:
-    """Condition-action rules only -- deliberately no __init__ storing
-    history, per the Step 1.2 spec. Given the same percept, it will
-    always return the same action; that's the whole point.
-
-        IF food_here      THEN stay put (already collected on arrival)
-        IF wall_ahead      THEN try 'Left'
-        ELSE                    keep going 'Up'
-    """
-
-    def sense_and_act(self, percept: dict) -> str:
-        if percept['food_here']:
-            return 'Up'
-        if percept['wall_ahead']:
-            return 'Left'
-        return 'Up'
+    """Step 1.2: Simple Reflex Agent using strict IF-THEN condition-action rules without memory."""
+    
+    def sense_and_act(self, percept: Dict[str, Any]) -> str:
+        if percept.get('food_here'):
+            return 'Suck'
+        elif percept.get('wall_ahead'):
+            return 'TurnLeft'
+        else:
+            return 'MoveForward'
 
 
 class ModelBasedAgent:
-    """Reflex rules + an internal model of the world.
-
-    The agent is never told its (x, y) position -- that's the whole
-    point of partial observability -- so it keeps its own belief about
-    where it is (est_pos) built purely from the actions it chose and
-    whether the environment's bump sensor ('bumped' in the percept)
-    says they actually succeeded. That's the Transition Model: "if I
-    moved Up and I wasn't bumped, my y went up by one."
-
-    tried_while_blocked remembers which directions it has already
-    attempted since it last got stuck at the current spot, so a wall
-    that keeps producing the same wall_ahead=True percept doesn't make
-    it repeat the same doomed action -- unlike SimpleReflexAgent.
-    """
-
-    DIRECTIONS = ['Up', 'Right', 'Down', 'Left']
-    DIR_VECTORS = {'Up': (0, 1), 'Right': (1, 0), 'Down': (0, -1), 'Left': (-1, 0)}
+    """Step 1.3: Model-Based Agent with internal state tracking and history memory."""
 
     def __init__(self):
-        self.est_pos = (0, 0)           # believed position, dead-reckoned
-        self.visited_cells = {(0, 0)}   # cells the agent believes it has occupied
-        self.last_action = None         # action chosen on the previous turn
-        self.tried_while_blocked = []   # directions already tried since getting stuck here
+        self.visited_cells: Set[Tuple[int, int]] = set()
+        self.estimated_pos: List[int] = [0, 0]
+        self.heading: str = 'Up'
+        self.last_action: str = 'None'
 
-    def _update_state(self, percept: dict):
-        """Transition model: fold the effect of our last action into our
-        belief state before deciding what to do next. percept.get(...)
-        defaults 'bumped' to False so this also works against the bare
-        {'wall_ahead', 'food_here'} percepts used in unit tests, where
-        position tracking isn't what's being exercised."""
-        if self.last_action in self.DIR_VECTORS and not percept.get('bumped', False):
-            dx, dy = self.DIR_VECTORS[self.last_action]
-            self.est_pos = (self.est_pos[0] + dx, self.est_pos[1] + dy)
-            self.visited_cells.add(self.est_pos)
+    def sense_and_act(self, percept: Dict[str, Any]) -> str:
+        # --- 1. Update State (Transition & Sensor Model) ---
+        if self.last_action == 'MoveForward' and not percept.get('hit_wall', False):
+            if self.heading == 'Up':
+                self.estimated_pos[1] += 1
+            elif self.heading == 'Down':
+                self.estimated_pos[1] -= 1
+            elif self.heading == 'Left':
+                self.estimated_pos[0] -= 1
+            elif self.heading == 'Right':
+                self.estimated_pos[0] += 1
+        elif self.last_action == 'TurnLeft':
+            directions = ['Up', 'Left', 'Down', 'Right']
+            self.heading = directions[(directions.index(self.heading) + 1) % 4]
+        elif self.last_action == 'TurnRight':
+            directions = ['Up', 'Right', 'Down', 'Left']
+            self.heading = directions[(directions.index(self.heading) + 1) % 4]
 
-    def _decide(self, percept: dict) -> str:
-        if percept['wall_ahead']:
-            # We know at least one direction is blocked: whichever way we
-            # were last facing -- that's *why* wall_ahead is True now.
-            if self.last_action in self.DIRECTIONS and self.last_action not in self.tried_while_blocked:
-                self.tried_while_blocked.append(self.last_action)
+        current_tuple = tuple(self.estimated_pos)
+        self.visited_cells.add(current_tuple)
 
-            candidates = [d for d in self.DIRECTIONS if d not in self.tried_while_blocked]
-            if not candidates:
-                # Tried every direction from this spot -- boxed in, start over.
-                self.tried_while_blocked = []
-                candidates = list(self.DIRECTIONS)
+        # Determine coordinates of the cell ahead for memory lookup
+        ahead_pos = list(self.estimated_pos)
+        if self.heading == 'Up':
+            ahead_pos[1] += 1
+        elif self.heading == 'Down':
+            ahead_pos[1] -= 1
+        elif self.heading == 'Left':
+            ahead_pos[0] -= 1
+        elif self.heading == 'Right':
+            ahead_pos[0] += 1
+        ahead_tuple = tuple(ahead_pos)
 
-            def leads_to_new_cell(d):
-                dx, dy = self.DIR_VECTORS[d]
-                return (self.est_pos[0] + dx, self.est_pos[1] + dy) not in self.visited_cells
+        # --- 2. Memory-Based IF-THEN Rules ---
+        if percept.get('food_here'):
+            action = 'Suck'
+        elif percept.get('wall_ahead') or ahead_tuple in self.visited_cells:
+            # If wall ahead or already visited, alternate movement path to escape loops
+            action = 'TurnRight'
+        else:
+            action = 'MoveForward'
 
-            unexplored = [d for d in candidates if leads_to_new_cell(d)]
-            action = (unexplored or candidates)[0]
-
-            self.tried_while_blocked.append(action)
-            return action
-
-        # Either the way ahead is clear, or we're standing on food that's
-        # already been auto-collected -- either way, keep heading the way
-        # we were already going instead of resetting to some fixed
-        # direction every turn (that fixed-default version is what got
-        # ModelBasedAgent stuck oscillating in corners during testing --
-        # it kept walking back the way it came instead of continuing on).
-        self.tried_while_blocked = []
-        return self.last_action if self.last_action in self.DIRECTIONS else 'Up'
-
-    def sense_and_act(self, percept: dict) -> str:
-        self._update_state(percept)
-        action = self._decide(percept)
         self.last_action = action
         return action
 
 
-class SearchAgent:
-    """Practical 03 -- Goal-Based / Planning Agent.
+class VisualGridHuntGame:
+    """Main game engine managing physics rules, step evaluation, and performance score."""
 
-    Unlike the reflex agents above, this agent doesn't react to the
-    current percept: it uses the *world model* exposed in the percept
-    (grid_size, walls, all_food, agent_pos) to SIMULATE future states
-    offline, build a complete plan of actions to the nearest food, and
-    then execute that plan one step at a time.
+    def __init__(self, width: int = 10, height: int = 10, num_food: int = 10, 
+                 num_opponents: int = 2, num_traps: int = 5, custom_walls: Set[Tuple[int, int]] = None):
+        self.state = EnvironmentState(width, height, num_food, num_opponents, num_traps, custom_walls)
+        self.score: int = 0
+        self.steps: int = 0
+        self.collision: bool = False
+        self.agent = ModelBasedAgent()  # Using ModelBasedAgent for Step 1.3
 
-    All three algorithms share the exact same node-expansion skeleton;
-    the ONLY thing that changes is the Frontier data structure:
+    @property
+    def width(self) -> int:
+        return self.state.width
 
-        BFS -> FIFO queue  (deque.popleft)  : shallowest node first
-        DFS -> LIFO stack  (list.pop)       : deepest node first
-        UCS -> Priority Q  (heapq.heappop)  : cheapest g(n) first
+    @property
+    def height(self) -> int:
+        return self.state.height
 
-    Each also keeps a `reached` set, turning Tree Search into Graph
-    Search: a state is expanded at most once, so cycles in the grid
-    can never trap the algorithm in an infinite loop.
-    """
+    def get_percept(self) -> Dict[str, Any]:
+        """Step 1.1: Returns partial observable local sensor data."""
+        current_pos_tuple = tuple(self.state.agent_pos)
+        
+        # Determine cell directly ahead based on current heading
+        ahead_pos = list(self.state.agent_pos)
+        if self.state.heading == 'Up':
+            ahead_pos[1] += 1
+        elif self.state.heading == 'Down':
+            ahead_pos[1] -= 1
+        elif self.state.heading == 'Left':
+            ahead_pos[0] -= 1
+        elif self.state.heading == 'Right':
+            ahead_pos[0] += 1
+            
+        ahead_tuple = tuple(ahead_pos)
+        is_out_of_bounds = not (0 <= ahead_pos[0] < self.state.width and 0 <= ahead_pos[1] < self.state.height)
 
-    DIR_VECTORS = {'Up': (0, 1), 'Down': (0, -1), 'Left': (-1, 0), 'Right': (1, 0)}
+        return {
+            'wall_ahead': is_out_of_bounds or (ahead_tuple in self.state.walls),
+            'food_here': current_pos_tuple in self.state.food_positions,
+            'toxin_here': current_pos_tuple in self.state.toxic_traps,
+            'hit_wall': current_pos_tuple in self.state.walls,
+            'collision': self.collision,
+            'score': self.score,
+            'remaining_food': len(self.state.food_positions)
+        }
 
-    def __init__(self):
-        self.plan = []              # Step 1.3: queued actions from the last search
-        self.active_algo = 'BFS'    # Step 1.3: switch to 'DFS' or 'UCS' to compare
+    def execute_action(self, action: str) -> None:
+        """Executes agent movement, rotations, opponent movement, and score updates."""
+        self.steps += 1
+        
+        # Handle Agent Rotations
+        directions = ['Up', 'Right', 'Down', 'Left']
+        current_idx = directions.index(self.state.heading)
+        
+        if action == 'TurnLeft':
+            self.state.heading = directions[(current_idx - 1) % 4]
+            return
+        elif action == 'TurnRight':
+            self.state.heading = directions[(current_idx + 1) % 4]
+            return
+        elif action == 'Suck':
+            # Collect food if present
+            tuple_pos = tuple(self.state.agent_pos)
+            if tuple_pos in self.state.food_positions:
+                self.state.food_positions.remove(tuple_pos)
+                self.score += 20
+            return
 
-    # ------------------------------------------------------------------
-    # Successor function: given a state (x, y), which (action, state')
-    # pairs are legal? This is the agent's transition model of the world.
-    # ------------------------------------------------------------------
-    def _successors(self, state, walls, grid_size):
-        width, height = grid_size
-        x, y = state
-        for action, (dx, dy) in self.DIR_VECTORS.items():
-            nx, ny = x + dx, y + dy
-            if 0 <= nx < width and 0 <= ny < height and (nx, ny) not in walls:
-                yield action, (nx, ny)
+        # Handle Forward Movement
+        new_pos = list(self.state.agent_pos)
+        if action == 'MoveForward':
+            if self.state.heading == 'Up':
+                new_pos[1] = min(self.state.height - 1, new_pos[1] + 1)
+            elif self.state.heading == 'Down':
+                new_pos[1] = max(0, new_pos[1] - 1)
+            elif self.state.heading == 'Left':
+                new_pos[0] = max(0, new_pos[0] - 1)
+            elif self.state.heading == 'Right':
+                new_pos[0] = min(self.state.width - 1, new_pos[0] + 1)
 
-    # ------------------------------------------------------------------
-    # Step 1.2 -- the three uninformed search strategies
-    # Each returns a list of actions from start to goal, or [] if the
-    # goal is unreachable.
-    # ------------------------------------------------------------------
-    def bfs_search(self, start, goal, walls, grid_size):
-        """Breadth-First Search: FIFO frontier -> shallowest node first.
-        Optimal here because every step costs the same (1)."""
-        frontier = deque([(start, [])])     # (state, actions-so-far)
-        reached = {start}                   # graph search: no re-expansion
-        while frontier:
-            state, path = frontier.popleft()    # FIFO
-            if state == goal:
-                return path
-            for action, nxt in self._successors(state, walls, grid_size):
-                if nxt not in reached:
-                    reached.add(nxt)
-                    frontier.append((nxt, path + [action]))
-        return []
+        # Wall collision check
+        if tuple(new_pos) in self.state.walls:
+            self.score -= 5
+        else:
+            self.state.agent_pos = new_pos
 
-    def dfs_search(self, start, goal, walls, grid_size):
-        """Depth-First Search: LIFO frontier -> deepest node first.
-        Complete (thanks to `reached`) but NOT optimal: it commits to
-        one branch all the way down before backtracking, producing the
-        winding routes you see in the simulation."""
-        frontier = [(start, [])]            # plain list used as a stack
-        reached = {start}
-        while frontier:
-            state, path = frontier.pop()        # LIFO
-            if state == goal:
-                return path
-            for action, nxt in self._successors(state, walls, grid_size):
-                if nxt not in reached:
-                    reached.add(nxt)
-                    frontier.append((nxt, path + [action]))
-        return []
+        tuple_pos = tuple(self.state.agent_pos)
 
-    def ucs_search(self, start, goal, walls, grid_size):
-        """Uniform-Cost Search: priority queue ordered by total path
-        cost g(n). With a uniform step cost of 1 this expands nodes in
-        the same order as BFS, but the machinery generalises to any
-        (non-negative) step costs -- e.g. weighting toxic-trap cells.
-        `tie` is a counter so heapq never has to compare tuples of
-        equal cost by their (uncomparable) contents."""
-        tie = 0
-        frontier = [(0, tie, start, [])]    # (g(n), tie, state, actions)
-        best_cost = {start: 0}              # reached, with cheapest g(n) found
-        while frontier:
-            cost, _, state, path = heapq.heappop(frontier)   # cheapest first
-            if state == goal:
-                return path
-            if cost > best_cost.get(state, float('inf')):
-                continue    # stale entry: a cheaper route was found already
-            for action, nxt in self._successors(state, walls, grid_size):
-                step_cost = 1               # uniform grid: every move costs 1
-                new_cost = cost + step_cost
-                if new_cost < best_cost.get(nxt, float('inf')):
-                    best_cost[nxt] = new_cost
-                    tie += 1
-                    heapq.heappush(frontier, (new_cost, tie, nxt, path + [action]))
-        return []
+        # Food pickup automatically on coordinate entry
+        if tuple_pos in self.state.food_positions:
+            self.state.food_positions.remove(tuple_pos)
+            self.score += 20
 
-    # ------------------------------------------------------------------
-    # Step 1.3 -- offline planning + step-by-step plan execution
-    # ------------------------------------------------------------------
-    def sense_and_act(self, percept: dict) -> str:
-        if not self.plan:
-            all_food = percept.get('all_food', [])
-            if not all_food:
-                return random.choice(['Up', 'Down', 'Left', 'Right'])
+        # Toxic trap interaction penalty (-15 points)
+        if tuple_pos in self.state.toxic_traps:
+            self.score -= 15
 
-            start = tuple(percept['agent_pos'])
-            walls = set(map(tuple, percept['walls']))
-            grid_size = percept['grid_size']
+        # Opponents random movement & collision check
+        for op in self.state.opponents:
+            move = random.choice(['Up', 'Down', 'Left', 'Right', 'Stay'])
+            if move == 'Up' and op[1] < self.state.height - 1:
+                op[1] += 1
+            elif move == 'Down' and op[1] > 0:
+                op[1] -= 1
+            elif move == 'Left' and op[0] > 0:
+                op[0] -= 1
+            elif move == 'Right' and op[0] < self.state.width - 1:
+                op[0] += 1
 
-            # Closest food pellet by Manhattan distance
-            goal = min(all_food, key=lambda f: abs(f[0] - start[0]) + abs(f[1] - start[1]))
-            goal = tuple(goal)
+            if op == self.state.agent_pos:
+                self.score -= 50
+                self.collision = True
 
-            search = {
-                'BFS': self.bfs_search,
-                'DFS': self.dfs_search,
-                'UCS': self.ucs_search,
-            }[self.active_algo]
+    def is_done(self) -> bool:
+        return len(self.state.food_positions) == 0 or self.steps >= 60 or self.collision
 
-            self.plan = search(start, goal, walls, grid_size)
 
-            if not self.plan:   # goal unreachable -- don't crash, wander
-                return random.choice(['Up', 'Down', 'Left', 'Right'])
+class GridGameGUI:
+    """Tkinter graphical UI interface responsible purely for visual rendering."""
 
-        return self.plan.pop(0)
+    def __init__(self, root: tk.Tk, width: int = 10, height: int = 10, 
+                 num_food: int = 12, num_opponents: int = 2, num_traps: int = 5, walls: Set[Tuple[int, int]] = None):
+        self.root = root
+        self.root.title("IT3012 - Model-Based Agent Grid Hunt")
+
+        self.env = VisualGridHuntGame(width=width, height=height, num_food=num_food, 
+                                      num_opponents=num_opponents, num_traps=num_traps, custom_walls=walls)
+
+        max_canvas_dim = 600
+        self.cell_size = max(20, min(max_canvas_dim // self.env.width, max_canvas_dim // self.env.height))
+
+        canvas_w = self.env.width * self.cell_size
+        canvas_h = self.env.height * self.cell_size
+
+        self.canvas = tk.Canvas(root, width=canvas_w, height=canvas_h, bg="white")
+        self.canvas.pack()
+
+        self.label = tk.Label(root, text="Score: 0 | Steps: 0", font=("Arial", 14))
+        self.label.pack(pady=10)
+
+        self.btn = tk.Button(root, text="Start Simulation", command=self.run_loop, font=("Arial", 12), bg="#000066", fg="white")
+        self.btn.pack(pady=5)
+
+        self.draw_grid()
+
+    def draw_grid(self) -> None:
+        """Renders grid entities including traps, food, opponents, and agent on the canvas."""
+        self.canvas.delete("all")
+
+        for x in range(self.env.width):
+            for y in range(self.env.height):
+                x1 = x * self.cell_size
+                y1 = (self.env.height - 1 - y) * self.cell_size
+                x2 = x1 + self.cell_size
+                y2 = y1 + self.cell_size
+
+                color = "#f1f5f9" if (x, y) not in self.env.state.walls else "#64748b"
+                self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="#cbd5e1")
+
+                if self.cell_size >= 40 and (x, y) in self.env.state.walls:
+                    self.canvas.create_text(x1 + self.cell_size / 2, y1 + self.cell_size / 2, text="W", fill="white", font=("Arial", 8, "bold"))
+
+        # Render Toxic Traps
+        for tx, ty in self.env.state.toxic_traps:
+            offset = self.cell_size * 0.2
+            x1 = tx * self.cell_size + offset
+            y1 = (self.env.height - 1 - ty) * self.cell_size + offset
+            x2 = x1 + self.cell_size * 0.6
+            y2 = y1 + self.cell_size * 0.6
+            self.canvas.create_oval(x1, y1, x2, y2, fill="#7e22ce", outline="#581c87")
+
+        # Render Food
+        for fx, fy in self.env.state.food_positions:
+            offset = self.cell_size * 0.25
+            x1 = fx * self.cell_size + offset
+            y1 = (self.env.height - 1 - fy) * self.cell_size + offset
+            self.canvas.create_oval(x1, y1, x1 + self.cell_size * 0.5, y1 + self.cell_size * 0.5, fill="#f59e0b", outline="#d97706")
+
+        # Render Opponents
+        for ox, oy in self.env.state.opponents:
+            offset = self.cell_size * 0.2
+            x1 = ox * self.cell_size + offset
+            y1 = (self.env.height - 1 - oy) * self.cell_size + offset
+            self.canvas.create_rectangle(x1, y1, x1 + self.cell_size * 0.6, y1 + self.cell_size * 0.6, fill="#990000", outline="#7a0000")
+
+        # Render Agent
+        ax, ay = self.env.state.agent_pos
+        offset = self.cell_size * 0.15
+        x1 = ax * self.cell_size + offset
+        y1 = (self.env.height - 1 - ay) * self.cell_size + offset
+        self.canvas.create_oval(x1, y1, x1 + self.cell_size * 0.7, y1 + self.cell_size * 0.7, fill="#000066", outline="#1e3a8a")
+
+    def run_loop(self) -> None:
+        self.btn.config(state="disabled")
+
+        def step():
+            if not self.env.is_done():
+                percept = self.env.get_percept()
+                action = self.env.agent.sense_and_act(percept)
+                self.env.execute_action(action)
+                self.draw_grid()
+
+                status_text = f"Score: {percept['score']} | Steps: {self.env.steps} | Action: {action}"
+                self.label.config(text=status_text)
+                self.root.after(250, step)
+            else:
+                end_text = f"Collision! Game Over! Final Score: {self.env.score}" if self.env.collision else f"Finished! Final Score: {self.env.score}"
+                self.label.config(text=end_text)
+                self.btn.config(state="normal")
+
+        step()
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = GridGameGUI(root, width=12, height=12, num_food=15, num_opponents=2, num_traps=6)
+    root.mainloop()
