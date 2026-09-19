@@ -1,4 +1,5 @@
 import random
+import math
 from collections import deque   # Practical 03: FIFO frontier for BFS
 import heapq                    # Practical 03: priority-queue frontier for UCS
 
@@ -101,7 +102,7 @@ class SearchAgent:
 
     def __init__(self):
         self.plan = []
-        self.active_algo = 'BFS'
+        self.active_algo = 'AStar'
 
     def _successors(self, state, walls, grid_size):
         """Return legal (action, next_state) pairs."""
@@ -183,35 +184,143 @@ class SearchAgent:
 
         return []
 
+    # Practical 04 - Step 1.1: Heuristic functions
+    def manhattan_distance(self, pos, goal):
+        x1, y1 = pos
+        x2, y2 = goal
+        return abs(x1 - x2) + abs(y1 - y2)
+
+    def euclidean_distance(self, pos, goal):
+        x1, y1 = pos
+        x2, y2 = goal
+        return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+
+    # Practical 04 - Step 1.2: A* Search
+    def astar_search(
+        self,
+        start_pos,
+        goal_pos,
+        walls,
+        grid_size,
+        heuristic_type='manhattan'
+    ):
+        frontier = []
+        reached_states = set()
+
+        if heuristic_type == 'euclidean':
+            h_start = self.euclidean_distance(start_pos, goal_pos)
+        else:
+            h_start = self.manhattan_distance(start_pos, goal_pos)
+
+        g_start = 0
+        f_start = g_start + h_start
+
+        # A* tuple: (f_cost, g_cost, current_pos, path_taken)
+        heapq.heappush(
+            frontier,
+            (f_start, g_start, start_pos, [])
+        )
+
+        while frontier:
+            f_cost, g_cost, current_pos, path_taken = heapq.heappop(frontier)
+
+            if current_pos == goal_pos:
+                return path_taken
+
+            if current_pos in reached_states:
+                continue
+
+            reached_states.add(current_pos)
+
+            for action, neighbor in self._successors(
+                current_pos,
+                walls,
+                grid_size
+            ):
+                if neighbor in reached_states:
+                    continue
+
+                new_g = g_cost + 1
+
+                if heuristic_type == 'euclidean':
+                    new_h = self.euclidean_distance(neighbor, goal_pos)
+                else:
+                    new_h = self.manhattan_distance(neighbor, goal_pos)
+
+                new_f = new_g + new_h
+
+                heapq.heappush(
+                    frontier,
+                    (
+                        new_f,
+                        new_g,
+                        neighbor,
+                        path_taken + [action]
+                    )
+                )
+
+        return []
+
     def sense_and_act(self, percept: dict) -> str:
         """Build a plan to the closest food and execute one action."""
         if not self.plan:
-            all_food = percept.get('all_food', [])
+            remaining_food = percept.get('all_food', [])
 
-            if not all_food:
+            if not remaining_food:
                 return random.choice(['Up', 'Down', 'Left', 'Right'])
 
             start = tuple(percept['agent_pos'])
             walls = set(map(tuple, percept['walls']))
             grid_size = percept['grid_size']
 
-            # Closest food by Manhattan distance.
+            # Choose the closest food item as the current goal.
             goal = min(
-                all_food,
+                remaining_food,
                 key=lambda food:
-                    abs(food[0] - start[0]) + abs(food[1] - start[1])
+                    self.manhattan_distance(start, tuple(food))
             )
             goal = tuple(goal)
 
-            search = {
-                'BFS': self.bfs_search,
-                'DFS': self.dfs_search,
-                'UCS': self.ucs_search,
-            }[self.active_algo]
+            if self.active_algo == 'BFS':
+                self.plan = self.bfs_search(
+                    start, goal, walls, grid_size
+                )
 
-            self.plan = search(start, goal, walls, grid_size)
+            elif self.active_algo == 'DFS':
+                self.plan = self.dfs_search(
+                    start, goal, walls, grid_size
+                )
+
+            elif self.active_algo == 'UCS':
+                self.plan = self.ucs_search(
+                    start, goal, walls, grid_size
+                )
+
+            elif self.active_algo == 'AStar':
+                self.plan = self.astar_search(
+                    start,
+                    goal,
+                    walls,
+                    grid_size,
+                    heuristic_type='manhattan'
+                )
+
+            else:
+                raise ValueError(
+                    f"Unknown search algorithm: {self.active_algo}"
+                )
 
             if not self.plan:
                 return random.choice(['Up', 'Down', 'Left', 'Right'])
 
         return self.plan.pop(0)
+
+
+# Practical 04 Step 1.1 testing checkpoint.
+if __name__ == "__main__":
+    agent = SearchAgent()
+    start = (0, 0)
+    goal = (3, 4)
+
+    print("Manhattan:", agent.manhattan_distance(start, goal))
+    print("Euclidean:", agent.euclidean_distance(start, goal))
